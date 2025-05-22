@@ -52,6 +52,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
         public string NamespaceIL;
         public bool HookOrig;
         public bool HookPrivate;
+        public bool NoVisibleCheck;
         public string HookExtName;
 
         public ModuleDefinition module_RuntimeDetour;
@@ -100,6 +101,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 NamespaceIL = "IL";
             HookOrig = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_ORIG") == "1";
             HookPrivate = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_PRIVATE") == "1";
+            NoVisibleCheck = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_NO_VISIBLE_CHECK") == "1";
 
             modder.MapDependency(modder.Module, "MonoMod.RuntimeDetour");
             if (!modder.DependencyCache.TryGetValue("MonoMod.RuntimeDetour", out module_RuntimeDetour))
@@ -505,6 +507,10 @@ namespace MonoMod.RuntimeDetour.HookGen {
         }
 
         TypeReference ImportVisible(TypeReference typeRef) {
+            if (NoVisibleCheck) {
+                goto TryImport;
+            }
+
             // Check if the declaring type is accessible.
             // If not, use its base type instead.
             // Note: This will break down with type specifications!
@@ -540,6 +546,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 goto Retry;
             }
 
+            TryImport:
             try {
                 return OutputModule.ImportReference(typeRef);
             } catch {
