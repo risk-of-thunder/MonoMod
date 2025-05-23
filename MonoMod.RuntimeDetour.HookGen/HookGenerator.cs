@@ -19,7 +19,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
 
         static readonly Regex NameVerifyRegex = new Regex("[^a-zA-Z]"); // Don't set RegexOptions.Compiled as old versions of mono hate it.
 
-        static readonly Dictionary<Type, string> ReflTypeNameMap = new Dictionary<Type, string> () {
+        static readonly Dictionary<Type, string> ReflTypeNameMap = new Dictionary<Type, string>() {
             { typeof(string), "string" },
             { typeof(object), "object" },
             { typeof(bool), "bool" },
@@ -52,7 +52,13 @@ namespace MonoMod.RuntimeDetour.HookGen {
         public string NamespaceIL;
         public bool HookOrig;
         public bool HookPrivate;
+
         public bool NoVisibleCheck;
+        public bool NoVisibleCheckBackCompatSuffix;
+        // Backcompat experiment.
+        //public const string NoVisibleCheckBackCompatSuffixString = "_PT";
+        public const string NoVisibleCheckBackCompatSuffixString = "";
+
         public string HookExtName;
 
         public ModuleDefinition module_RuntimeDetour;
@@ -102,6 +108,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
             HookOrig = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_ORIG") == "1";
             HookPrivate = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_PRIVATE") == "1";
             NoVisibleCheck = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_NO_VISIBLE_CHECK") == "1";
+            NoVisibleCheckBackCompatSuffix = Environment.GetEnvironmentVariable("MONOMOD_HOOKGEN_NO_VISIBLE_CHECK_BACKCOMPAT_SUFFIX") == "1";
 
             modder.MapDependency(modder.Module, "MonoMod.RuntimeDetour");
             if (!modder.DependencyCache.TryGetValue("MonoMod.RuntimeDetour", out module_RuntimeDetour))
@@ -168,14 +175,16 @@ namespace MonoMod.RuntimeDetour.HookGen {
             hookType = new TypeDefinition(
                 type.IsNested ? null : (Namespace + (string.IsNullOrEmpty(type.Namespace) ? "" : ("." + type.Namespace))),
                 type.Name,
-                (type.IsNested ? TypeAttributes.NestedPublic : TypeAttributes.Public) | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.Class,
+                (type.IsNested ? TypeAttributes.NestedPublic : TypeAttributes.Public) |
+                TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.Class,
                 OutputModule.TypeSystem.Object
             );
 
             hookILType = new TypeDefinition(
                 type.IsNested ? null : (NamespaceIL + (string.IsNullOrEmpty(type.Namespace) ? "" : ("." + type.Namespace))),
                 type.Name,
-                (type.IsNested ? TypeAttributes.NestedPublic : TypeAttributes.Public) | TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.Class,
+                (type.IsNested ? TypeAttributes.NestedPublic : TypeAttributes.Public) |
+                TypeAttributes.Abstract | TypeAttributes.Sealed | TypeAttributes.Class,
                 OutputModule.TypeSystem.Object
             );
 
@@ -217,7 +226,8 @@ namespace MonoMod.RuntimeDetour.HookGen {
 
             IEnumerable<MethodDefinition> overloads = null;
             if (suffix) {
-                overloads = method.DeclaringType.Methods.Where(other => !other.HasGenericParameters && GetFriendlyName(other) == name && other != method);
+                overloads = method.DeclaringType.Methods.Where(other => !other.HasGenericParameters &&
+                GetFriendlyName(other) == name && other != method);
                 if (overloads.Count() == 0) {
                     suffix = false;
                 }
@@ -251,142 +261,205 @@ namespace MonoMod.RuntimeDetour.HookGen {
                     int i = 1;
                     hookType.FindEvent(nameTmp = name + "_" + i) != null;
                     i++
-                );
+                )
+                    ;
                 name = nameTmp;
             }
 
             // TODO: Fix possible conflict when other members with the same names exist.
 
-            TypeDefinition delOrig = GenerateDelegateFor(method);
-            delOrig.Name = "orig_" + name;
-            delOrig.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
-            hookType.NestedTypes.Add(delOrig);
+            GenerateDelegateForResult delOrigs = GenerateDelegateFor(method);
+            {
+                TypeDefinition delOrig = delOrigs.TypeDef;
+                delOrig.Name = "orig_" + name;
+                delOrig.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
+                hookType.NestedTypes.Add(delOrig);
+            }
+            if (delOrigs.TypeDefWithNoVisibleCheckSuffix != null) {
+                TypeDefinition delOrig = delOrigs.TypeDefWithNoVisibleCheckSuffix;
+                delOrig.Name = "orig_" + name + NoVisibleCheckBackCompatSuffixString;
+                delOrig.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
+                hookType.NestedTypes.Add(delOrig);
+            }
 
-            TypeDefinition delHook = GenerateDelegateFor(method);
-            delHook.Name = "hook_" + name;
-            MethodDefinition delHookInvoke = delHook.FindMethod("Invoke");
-            delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
-            MethodDefinition delHookBeginInvoke = delHook.FindMethod("BeginInvoke");
-            delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
-            delHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
-            hookType.NestedTypes.Add(delHook);
+            GenerateDelegateForResult delHooks = GenerateDelegateFor(method);
+            {
+                TypeDefinition delOrig = delOrigs.TypeDef;
+                TypeDefinition delHook = delHooks.TypeDef;
+                delHook.Name = "hook_" + name;
+                MethodDefinition delHookInvoke = delHook.FindMethod("Invoke");
+                delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                MethodDefinition delHookBeginInvoke = delHook.FindMethod("BeginInvoke");
+                delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                delHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
+                hookType.NestedTypes.Add(delHook);
+            }
+            if (delHooks.TypeDefWithNoVisibleCheckSuffix != null && delOrigs.TypeDefWithNoVisibleCheckSuffix != null) {
+                TypeDefinition delOrig = delOrigs.TypeDefWithNoVisibleCheckSuffix;
+                TypeDefinition delHook = delHooks.TypeDefWithNoVisibleCheckSuffix;
+                delHook.Name = "hook_" + name + NoVisibleCheckBackCompatSuffixString;
+                MethodDefinition delHookInvoke = delHook.FindMethod("Invoke");
+                delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                MethodDefinition delHookBeginInvoke = delHook.FindMethod("BeginInvoke");
+                delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                delHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
+                hookType.NestedTypes.Add(delHook);
+            }
 
             ILProcessor il;
             GenericInstanceMethod endpointMethod;
 
             MethodReference methodRef = OutputModule.ImportReference(method);
 
-            #region Hook
+            if (delHooks.TypeDefWithNoVisibleCheckSuffix != null && delOrigs.TypeDefWithNoVisibleCheckSuffix != null) {
+                GenerateFor2(delHooks.TypeDef, true);
 
-            MethodDefinition addHook = new MethodDefinition(
-                "add_" + name,
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
-                OutputModule.TypeSystem.Void
-            );
-            addHook.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, delHook));
-            addHook.Body = new MethodBody(addHook);
-            il = addHook.Body.GetILProcessor();
-            il.Emit(OpCodes.Ldtoken, methodRef);
-            il.Emit(OpCodes.Call, m_GetMethodFromHandle);
-            il.Emit(OpCodes.Ldarg_0);
-            endpointMethod = new GenericInstanceMethod(m_Add);
-            endpointMethod.GenericArguments.Add(delHook);
-            il.Emit(OpCodes.Call, endpointMethod);
-            il.Emit(OpCodes.Ret);
-            hookType.Methods.Add(addHook);
-
-            MethodDefinition removeHook = new MethodDefinition(
-                "remove_" + name,
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
-                OutputModule.TypeSystem.Void
-            );
-            removeHook.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, delHook));
-            removeHook.Body = new MethodBody(removeHook);
-            il = removeHook.Body.GetILProcessor();
-            il.Emit(OpCodes.Ldtoken, methodRef);
-            il.Emit(OpCodes.Call, m_GetMethodFromHandle);
-            il.Emit(OpCodes.Ldarg_0);
-            endpointMethod = new GenericInstanceMethod(m_Remove);
-            endpointMethod.GenericArguments.Add(delHook);
-            il.Emit(OpCodes.Call, endpointMethod);
-            il.Emit(OpCodes.Ret);
-            hookType.Methods.Add(removeHook);
-
-            EventDefinition evHook = new EventDefinition(name, EventAttributes.None, delHook) {
-                AddMethod = addHook,
-                RemoveMethod = removeHook
-            };
-            hookType.Events.Add(evHook);
-
-            #endregion
-
-            #region Hook IL
-
-            MethodDefinition addIL = new MethodDefinition(
-                "add_" + name,
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
-                OutputModule.TypeSystem.Void
-            );
-            addIL.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, t_ILManipulator));
-            addIL.Body = new MethodBody(addIL);
-            il = addIL.Body.GetILProcessor();
-            il.Emit(OpCodes.Ldtoken, methodRef);
-            il.Emit(OpCodes.Call, m_GetMethodFromHandle);
-            il.Emit(OpCodes.Ldarg_0);
-            endpointMethod = new GenericInstanceMethod(m_Modify);
-            endpointMethod.GenericArguments.Add(delHook);
-            il.Emit(OpCodes.Call, endpointMethod);
-            il.Emit(OpCodes.Ret);
-            hookILType.Methods.Add(addIL);
-
-            MethodDefinition removeIL = new MethodDefinition(
-                "remove_" + name,
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
-                OutputModule.TypeSystem.Void
-            );
-            removeIL.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, t_ILManipulator));
-            removeIL.Body = new MethodBody(removeIL);
-            il = removeIL.Body.GetILProcessor();
-            il.Emit(OpCodes.Ldtoken, methodRef);
-            il.Emit(OpCodes.Call, m_GetMethodFromHandle);
-            il.Emit(OpCodes.Ldarg_0);
-            endpointMethod = new GenericInstanceMethod(m_Unmodify);
-            endpointMethod.GenericArguments.Add(delHook);
-            il.Emit(OpCodes.Call, endpointMethod);
-            il.Emit(OpCodes.Ret);
-            hookILType.Methods.Add(removeIL);
-
-            EventDefinition evIL = new EventDefinition(name, EventAttributes.None, t_ILManipulator) {
-                AddMethod = addIL,
-                RemoveMethod = removeIL
-            };
-            hookILType.Events.Add(evIL);
-
-            #endregion
+                // Backcompat experiment.
+                GenerateFor2(delHooks.TypeDefWithNoVisibleCheckSuffix, false);
+                //GenerateFor2(delHooks.TypeDefWithNoVisibleCheckSuffix, true);
+            } else {
+                // Backcompat experiment.
+                GenerateFor2(delHooks.TypeDef, false);
+                //GenerateFor2(delHooks.TypeDef, true);
+            }
 
             return true;
+
+            void GenerateFor2(TypeDefinition delHook, bool isPrivate) {
+                #region Hook
+
+                MethodDefinition addHook = new MethodDefinition(
+                    "add_" + name,
+                    (isPrivate ? MethodAttributes.Private : MethodAttributes.Public) | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
+                    OutputModule.TypeSystem.Void
+                );
+                addHook.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, delHook));
+                addHook.Body = new MethodBody(addHook);
+                il = addHook.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldtoken, methodRef);
+                il.Emit(OpCodes.Call, m_GetMethodFromHandle);
+                il.Emit(OpCodes.Ldarg_0);
+                endpointMethod = new GenericInstanceMethod(m_Add);
+                endpointMethod.GenericArguments.Add(delHook);
+                il.Emit(OpCodes.Call, endpointMethod);
+                il.Emit(OpCodes.Ret);
+                hookType.Methods.Add(addHook);
+
+                MethodDefinition removeHook = new MethodDefinition(
+                    "remove_" + name,
+                    (isPrivate ? MethodAttributes.Private : MethodAttributes.Public) | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
+                    OutputModule.TypeSystem.Void
+                );
+                removeHook.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, delHook));
+                removeHook.Body = new MethodBody(removeHook);
+                il = removeHook.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldtoken, methodRef);
+                il.Emit(OpCodes.Call, m_GetMethodFromHandle);
+                il.Emit(OpCodes.Ldarg_0);
+                endpointMethod = new GenericInstanceMethod(m_Remove);
+                endpointMethod.GenericArguments.Add(delHook);
+                il.Emit(OpCodes.Call, endpointMethod);
+                il.Emit(OpCodes.Ret);
+                hookType.Methods.Add(removeHook);
+
+                EventDefinition evHook = new EventDefinition(name, EventAttributes.None, delHook) {
+                    AddMethod = addHook,
+                    RemoveMethod = removeHook
+                };
+                hookType.Events.Add(evHook);
+
+                #endregion
+
+                #region Hook IL
+
+                MethodDefinition addIL = new MethodDefinition(
+                    "add_" + name,
+                    (isPrivate ? MethodAttributes.Private : MethodAttributes.Public) | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
+                    OutputModule.TypeSystem.Void
+                );
+                addIL.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, t_ILManipulator));
+                addIL.Body = new MethodBody(addIL);
+                il = addIL.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldtoken, methodRef);
+                il.Emit(OpCodes.Call, m_GetMethodFromHandle);
+                il.Emit(OpCodes.Ldarg_0);
+                endpointMethod = new GenericInstanceMethod(m_Modify);
+                endpointMethod.GenericArguments.Add(delHook);
+                il.Emit(OpCodes.Call, endpointMethod);
+                il.Emit(OpCodes.Ret);
+                hookILType.Methods.Add(addIL);
+
+                MethodDefinition removeIL = new MethodDefinition(
+                    "remove_" + name,
+                    (isPrivate ? MethodAttributes.Private : MethodAttributes.Public) | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.Static,
+                    OutputModule.TypeSystem.Void
+                );
+                removeIL.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, t_ILManipulator));
+                removeIL.Body = new MethodBody(removeIL);
+                il = removeIL.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldtoken, methodRef);
+                il.Emit(OpCodes.Call, m_GetMethodFromHandle);
+                il.Emit(OpCodes.Ldarg_0);
+                endpointMethod = new GenericInstanceMethod(m_Unmodify);
+                endpointMethod.GenericArguments.Add(delHook);
+                il.Emit(OpCodes.Call, endpointMethod);
+                il.Emit(OpCodes.Ret);
+                hookILType.Methods.Add(removeIL);
+
+                EventDefinition evIL = new EventDefinition(name, EventAttributes.None, t_ILManipulator) {
+                    AddMethod = addIL,
+                    RemoveMethod = removeIL
+                };
+                hookILType.Events.Add(evIL);
+
+                #endregion
+            }
         }
 
-        public TypeDefinition GenerateDelegateFor(MethodDefinition method) {
-            string name = GetFriendlyName(method);
-            int index = method.DeclaringType.Methods.Where(other => !other.HasGenericParameters && GetFriendlyName(other) == name).ToList().IndexOf(method);
-            if (index != 0) {
-                string suffix = index.ToString(CultureInfo.InvariantCulture);
-                do {
-                    name = name + "_" + suffix;
-                } while (method.DeclaringType.Methods.Any(other => !other.HasGenericParameters && GetFriendlyName(other) == (name + suffix)));
-            }
-            name = "d_" + name;
+        public struct GenerateDelegateForResult {
+            public TypeDefinition TypeDef;
+            public TypeDefinition TypeDefWithNoVisibleCheckSuffix;
+        }
 
-            TypeDefinition del = new TypeDefinition(
+        public GenerateDelegateForResult GenerateDelegateFor(MethodDefinition method) {
+            TypeDefinition del = null;
+            TypeDefinition delWithNoVisibleCheckSuffix = null;
+
+            if (NoVisibleCheck) {
+                if (NoVisibleCheckBackCompatSuffix) {
+                    // Private types allowed, potential NoVisibleCheck suffix.
+                    bool needSuffix = GenerateDelegateFor2(method, false, out del);
+                    if (needSuffix) {
+                        GenerateDelegateFor2(method, true, out delWithNoVisibleCheckSuffix);
+                    }
+                } else {
+                    // Private types allowed, no NoVisibleCheck suffix.
+                    GenerateDelegateFor2(method, true, out del);
+                }
+            } else {
+                // No private types allowed, no NoVisibleCheck suffix.
+                GenerateDelegateFor2(method, false, out del);
+            }
+
+            return new GenerateDelegateForResult {
+                TypeDef = del,
+                TypeDefWithNoVisibleCheckSuffix = delWithNoVisibleCheckSuffix
+            };
+        }
+
+        // Returns true if this method should be called again for NoVisibleBackCompat purposes.
+        private bool GenerateDelegateFor2(MethodDefinition method, bool allowPrivateTypes, out TypeDefinition del) {
+            del = new TypeDefinition(
                 null, null,
                 TypeAttributes.NestedPublic | TypeAttributes.Sealed | TypeAttributes.Class,
                 t_MulticastDelegate
             );
-
             MethodDefinition ctor = new MethodDefinition(
                 ".ctor",
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName | MethodAttributes.ReuseSlot,
+                MethodAttributes.Public |
+                MethodAttributes.HideBySig |
+                MethodAttributes.SpecialName | MethodAttributes.RTSpecialName |
+                MethodAttributes.ReuseSlot,
                 OutputModule.TypeSystem.Void
             ) {
                 ImplAttributes = MethodImplAttributes.Runtime | MethodImplAttributes.Managed,
@@ -397,26 +470,34 @@ namespace MonoMod.RuntimeDetour.HookGen {
             ctor.Body = new MethodBody(ctor);
             del.Methods.Add(ctor);
 
+            bool needVisibilityBackCompat = false;
+
+            TypeReference invokeReturnType = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.ReturnType,
+                allowPrivateTypes, ref needVisibilityBackCompat);
             MethodDefinition invoke = new MethodDefinition(
                 "Invoke",
                 MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.NewSlot,
-                ImportVisible(method.ReturnType)
+                invokeReturnType
             ) {
                 ImplAttributes = MethodImplAttributes.Runtime | MethodImplAttributes.Managed,
                 HasThis = true
             };
             if (!method.IsStatic) {
-                TypeReference selfType = ImportVisible(method.DeclaringType);
+                TypeReference selfType = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.DeclaringType,
+                    allowPrivateTypes, ref needVisibilityBackCompat);
                 if (method.DeclaringType.IsValueType)
                     selfType = new ByReferenceType(selfType);
                 invoke.Parameters.Add(new ParameterDefinition("self", ParameterAttributes.None, selfType));
             }
-            foreach (ParameterDefinition param in method.Parameters)
+            foreach (ParameterDefinition param in method.Parameters) {
+                TypeReference paramType = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(param.ParameterType,
+                    allowPrivateTypes, ref needVisibilityBackCompat);
                 invoke.Parameters.Add(new ParameterDefinition(
                     param.Name,
                     param.Attributes & ~ParameterAttributes.Optional & ~ParameterAttributes.HasDefault,
-                    ImportVisible(param.ParameterType)
+                    paramType
                 ));
+            }
             invoke.Body = new MethodBody(invoke);
             del.Methods.Add(invoke);
 
@@ -447,7 +528,95 @@ namespace MonoMod.RuntimeDetour.HookGen {
             invokeEnd.Body = new MethodBody(invokeEnd);
             del.Methods.Add(invokeEnd);
 
-            return del;
+            // Backcompat experiment.
+            if (needVisibilityBackCompat) {
+                del.Attributes &= ~TypeAttributes.NestedPublic;
+                del.Attributes |= TypeAttributes.NestedPrivate;
+
+                ctor.Attributes &= ~MethodAttributes.Public;
+                ctor.Attributes |= MethodAttributes.Private;
+
+                invoke.Attributes &= ~MethodAttributes.Public;
+                invoke.Attributes |= MethodAttributes.Private;
+
+                invokeBegin.Attributes &= ~MethodAttributes.Public;
+                invokeBegin.Attributes |= MethodAttributes.Private;
+
+                invokeEnd.Attributes &= ~MethodAttributes.Public;
+                invokeEnd.Attributes |= MethodAttributes.Private;
+
+                // Block needed so that mono is happy and correctly find the Invoke methods
+                {
+                    TypeReference invokeReturnType2 = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.ReturnType,
+    true, ref needVisibilityBackCompat);
+                    MethodDefinition invoke2 = new MethodDefinition(
+                        "Invoke",
+                        MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.NewSlot,
+                        invokeReturnType2
+                    ) {
+                        ImplAttributes = MethodImplAttributes.Runtime | MethodImplAttributes.Managed,
+                        HasThis = true
+                    };
+                    if (!method.IsStatic) {
+                        TypeReference selfType2 = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.DeclaringType,
+                            true, ref needVisibilityBackCompat);
+                        if (method.DeclaringType.IsValueType)
+                            selfType2 = new ByReferenceType(selfType2);
+                        invoke2.Parameters.Add(new ParameterDefinition("self", ParameterAttributes.None, selfType2));
+                    }
+                    foreach (ParameterDefinition param in method.Parameters) {
+                        TypeReference paramType = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(param.ParameterType,
+                            true, ref needVisibilityBackCompat);
+                        invoke2.Parameters.Add(new ParameterDefinition(
+                            param.Name,
+                            param.Attributes & ~ParameterAttributes.Optional & ~ParameterAttributes.HasDefault,
+                            paramType
+                        ));
+                    }
+                    invoke2.Body = new MethodBody(invoke2);
+                    del.Methods.Add(invoke2);
+
+                    MethodDefinition invokeBegin2 = new MethodDefinition(
+    "BeginInvoke",
+    MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.HideBySig | MethodAttributes.NewSlot,
+    t_IAsyncResult
+) {
+                        ImplAttributes = MethodImplAttributes.Runtime | MethodImplAttributes.Managed,
+                        HasThis = true
+                    };
+                    foreach (ParameterDefinition param in invoke.Parameters)
+                        invokeBegin2.Parameters.Add(new ParameterDefinition(param.Name, param.Attributes, param.ParameterType));
+                    invokeBegin2.Parameters.Add(new ParameterDefinition("callback", ParameterAttributes.None, t_AsyncCallback));
+                    invokeBegin2.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, OutputModule.TypeSystem.Object));
+                    invokeBegin2.Body = new MethodBody(invokeBegin2);
+                    del.Methods.Add(invokeBegin2);
+                }
+
+            }
+
+            return needVisibilityBackCompat;
+        }
+
+        private TypeReference GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(TypeReference typeRef,
+            bool allowPrivateTypes, ref bool needBackCompactVisiblity) {
+
+            TypeReference res;
+            if (allowPrivateTypes) {
+                res = ImportSafe(typeRef);
+            } else {
+                ImportVisibleResult importVisibleTypeRes = ImportVisible(typeRef);
+
+                // We need the suffix when
+                // 1. the type is not visible
+                // 2. allow non visible types
+                // 3. Need to keep back compatibility with older generated hookgen modules
+                if (importVisibleTypeRes.Modified && NoVisibleCheck && NoVisibleCheckBackCompatSuffix) {
+                    needBackCompactVisiblity = true;
+                }
+                res = importVisibleTypeRes.TypeRef;
+            }
+
+            return res;
         }
 
         string GetFriendlyName(MethodReference method) {
@@ -506,10 +675,14 @@ namespace MonoMod.RuntimeDetour.HookGen {
             return true;
         }
 
-        TypeReference ImportVisible(TypeReference typeRef) {
-            if (NoVisibleCheck) {
-                goto TryImport;
-            }
+        public struct ImportVisibleResult {
+            public TypeReference TypeRef;
+            public bool Modified;
+        }
+
+        // Returns Modified = true if the typeRef was modified due to being non visible.
+        ImportVisibleResult ImportVisible(TypeReference typeRef) {
+            bool modified = false;
 
             // Check if the declaring type is accessible.
             // If not, use its base type instead.
@@ -519,11 +692,17 @@ namespace MonoMod.RuntimeDetour.HookGen {
 
             Retry:
             typeRef = type.BaseType;
+            modified = true;
             type = typeRef?.SafeResolve();
 
             Try:
-            if (type == null) // Unresolvable - probably private anyway.
-                return OutputModule.TypeSystem.Object;
+            if (type == null) { // Unresolvable - probably private anyway.
+                modified = true;
+                return new ImportVisibleResult {
+                    TypeRef = OutputModule.TypeSystem.Object,
+                    Modified = modified
+                };
+            }
 
             // Generic instance types are special. Try to match them exactly or baseify them.
             if (typeRef is GenericInstanceType typeGen && !HasPublicArgs(typeGen))
@@ -535,10 +714,11 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 if (IsPublic(parent) && (parent == type || !parent.HasGenericParameters))
                     continue;
                 // If it isn't public, ...
-                
+
                 if (type.IsEnum) {
                     // ... try the enum's underlying type.
                     typeRef = type.FindField("value__").FieldType;
+                    modified = true;
                     break;
                 }
 
@@ -546,7 +726,13 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 goto Retry;
             }
 
-            TryImport:
+            return new ImportVisibleResult {
+                TypeRef = ImportSafe(typeRef),
+                Modified = modified
+            };
+        }
+
+        TypeReference ImportSafe(TypeReference typeRef) {
             try {
                 return OutputModule.ImportReference(typeRef);
             } catch {
