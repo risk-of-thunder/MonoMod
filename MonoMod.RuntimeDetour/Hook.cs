@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Linq.Expressions;
 using MonoMod.Utils;
 using Mono.Cecil.Cil;
+using System.Linq;
 
 namespace MonoMod.RuntimeDetour {
     public struct HookConfig {
@@ -85,7 +86,40 @@ namespace MonoMod.RuntimeDetour {
             }
 
             MethodInfo origInvoke = _OrigDelegateInvoke = origType?.GetMethod("Invoke");
-            // TODO: Check origType Invoke arguments.
+
+            // Yet another NoVisibleCheck back compatibility hack.
+            // Fix a case where the Orig delegate type picked is not the right one of the two.
+            try {
+                if (origType != null && _OrigDelegateInvoke != null) {
+                    ParameterInfo[] origInvokeArgs = origInvoke.GetParameters();
+                    Type[] origInvokeArgTypes;
+                    origInvokeArgTypes = new Type[origInvokeArgs.Length];
+                    for (int i = 0; i < origInvokeArgs.Length; i++)
+                        origInvokeArgTypes[i] = origInvokeArgs[i].ParameterType;
+
+                    for (int i = 0; i < argTypes.Length; i++) {
+                        Type argMethod = argTypes[i];
+                        Type argOrigInvoke = origInvokeArgTypes[i];
+                        if (!argMethod.IsCompatible(argOrigInvoke)) {
+                            // Doesn't match, try to get the correct OrigDelegateInvoke from the sibling orig_ delegate type.
+                            var bindingFlags = (BindingFlags) (-1);
+                            Type sibling = origType.DeclaringType
+                            .GetNestedTypes(bindingFlags)
+                            .Where(t => t != origType && t.Name == origType.Name)
+                            .FirstOrDefault();
+
+                            if (sibling != null) {
+                                origType = sibling;
+                                _OrigDelegateType = origType;
+                                origInvoke = _OrigDelegateInvoke = origType?.GetMethod("Invoke");
+                            }
+
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception) {
+            }
 
             DynamicMethodDefinition dmd;
             ILProcessor il;
