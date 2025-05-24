@@ -207,6 +207,38 @@ namespace MonoMod.RuntimeDetour.HookGen {
             }
         }
 
+        /// <summary>
+        /// Find a method for a given ID.
+        /// </summary>
+        /// <param name="type">The type to search in.</param>
+        /// <param name="id">The method ID.</param>
+        /// <param name="simple">Whether to perform a simple search pass as well or not.</param>
+        /// <returns>The first matching method or null.</returns>
+        public static List<MethodDefinition> FindMethods(TypeDefinition type, string id, bool simple = true) {
+            List<MethodDefinition> methods = new List<MethodDefinition>();
+            if (simple && !id.Contains(" ", StringComparison.Ordinal)) {
+                // First simple pass: With type name (just "Namespace.Type::MethodName")
+                foreach (MethodDefinition method in type.Methods)
+                    if (method.GetID(simple: true) == id)
+                        methods.Add(method);
+                // Second simple pass: Without type name (basically name only)
+                foreach (MethodDefinition method in type.Methods)
+                    if (method.GetID(withType: false, simple: true) == id)
+                        methods.Add(method);
+            }
+
+            // First pass: With type name (f.e. global searches)
+            foreach (MethodDefinition method in type.Methods)
+                if (method.GetID() == id)
+                    methods.Add(method);
+            // Second pass: Without type name (f.e. LinkTo)
+            foreach (MethodDefinition method in type.Methods)
+                if (method.GetID(withType: false) == id)
+                    methods.Add(method);
+
+            return methods;
+        }
+
         public bool GenerateFor(TypeDefinition hookType, TypeDefinition hookILType, MethodDefinition method) {
             if (method.HasGenericParameters ||
                 method.IsAbstract ||
@@ -268,7 +300,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
 
             // TODO: Fix possible conflict when other members with the same names exist.
 
-            GenerateDelegateForResult delOrigs = GenerateDelegateFor(method);
+            GenerateDelegateForResult delOrigs = GenerateDelegateFor(method, true);
             {
                 TypeDefinition delOrig = delOrigs.TypeDef;
                 delOrig.Name = "orig_" + name;
@@ -282,15 +314,19 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 hookType.NestedTypes.Add(delOrig);
             }
 
-            GenerateDelegateForResult delHooks = GenerateDelegateFor(method);
+            GenerateDelegateForResult delHooks = GenerateDelegateFor(method, false);
             {
                 TypeDefinition delOrig = delOrigs.TypeDef;
                 TypeDefinition delHook = delHooks.TypeDef;
                 delHook.Name = "hook_" + name;
-                MethodDefinition delHookInvoke = delHook.FindMethod("Invoke");
-                delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
-                MethodDefinition delHookBeginInvoke = delHook.FindMethod("BeginInvoke");
-                delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                List<MethodDefinition> delHookInvokes = HookGenerator.FindMethods(delHook, "Invoke");
+                foreach (MethodDefinition delHookInvoke in delHookInvokes) {
+                    delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                }
+                List<MethodDefinition> delHookBeginInvokes = HookGenerator.FindMethods(delHook, "BeginInvoke");
+                foreach (MethodDefinition delHookBeginInvoke in delHookBeginInvokes) {
+                    delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                }
                 delHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
                 hookType.NestedTypes.Add(delHook);
             }
@@ -298,10 +334,14 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 TypeDefinition delOrig = delOrigs.TypeDefWithNoVisibleCheckSuffix;
                 TypeDefinition delHook = delHooks.TypeDefWithNoVisibleCheckSuffix;
                 delHook.Name = "hook_" + name + NoVisibleCheckBackCompatSuffixString;
-                MethodDefinition delHookInvoke = delHook.FindMethod("Invoke");
-                delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
-                MethodDefinition delHookBeginInvoke = delHook.FindMethod("BeginInvoke");
-                delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                List<MethodDefinition> delHookInvokes = HookGenerator.FindMethods(delHook, "Invoke");
+                foreach (MethodDefinition delHookInvoke in delHookInvokes) {
+                    delHookInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                }
+                List<MethodDefinition> delHookBeginInvokes = HookGenerator.FindMethods(delHook, "BeginInvoke");
+                foreach (MethodDefinition delHookBeginInvoke in delHookBeginInvokes) {
+                    delHookBeginInvoke.Parameters.Insert(0, new ParameterDefinition("orig", ParameterAttributes.None, delOrig));
+                }
                 delHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
                 hookType.NestedTypes.Add(delHook);
             }
@@ -343,6 +383,8 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 endpointMethod.GenericArguments.Add(delHook);
                 il.Emit(OpCodes.Call, endpointMethod);
                 il.Emit(OpCodes.Ret);
+                if (isPrivate)
+                    addHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
                 hookType.Methods.Add(addHook);
 
                 MethodDefinition removeHook = new MethodDefinition(
@@ -360,12 +402,16 @@ namespace MonoMod.RuntimeDetour.HookGen {
                 endpointMethod.GenericArguments.Add(delHook);
                 il.Emit(OpCodes.Call, endpointMethod);
                 il.Emit(OpCodes.Ret);
+                if (isPrivate)
+                    removeHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
                 hookType.Methods.Add(removeHook);
 
                 EventDefinition evHook = new EventDefinition(name, EventAttributes.None, delHook) {
                     AddMethod = addHook,
                     RemoveMethod = removeHook
                 };
+                if (isPrivate)
+                    evHook.CustomAttributes.Add(GenerateEditorBrowsable(EditorBrowsableState.Never));
                 hookType.Events.Add(evHook);
 
                 #endregion
@@ -421,24 +467,24 @@ namespace MonoMod.RuntimeDetour.HookGen {
             public TypeDefinition TypeDefWithNoVisibleCheckSuffix;
         }
 
-        public GenerateDelegateForResult GenerateDelegateFor(MethodDefinition method) {
+        public GenerateDelegateForResult GenerateDelegateFor(MethodDefinition method, bool isOrigDelegate) {
             TypeDefinition del = null;
             TypeDefinition delWithNoVisibleCheckSuffix = null;
 
             if (NoVisibleCheck) {
                 if (NoVisibleCheckBackCompatSuffix) {
                     // Private types allowed, potential NoVisibleCheck suffix.
-                    bool needSuffix = GenerateDelegateFor2(method, false, out del);
+                    bool needSuffix = GenerateDelegateFor2(method, false, isOrigDelegate, out del);
                     if (needSuffix) {
-                        GenerateDelegateFor2(method, true, out delWithNoVisibleCheckSuffix);
+                        GenerateDelegateFor2(method, true, isOrigDelegate, out delWithNoVisibleCheckSuffix);
                     }
                 } else {
                     // Private types allowed, no NoVisibleCheck suffix.
-                    GenerateDelegateFor2(method, true, out del);
+                    GenerateDelegateFor2(method, true, isOrigDelegate, out del);
                 }
             } else {
                 // No private types allowed, no NoVisibleCheck suffix.
-                GenerateDelegateFor2(method, false, out del);
+                GenerateDelegateFor2(method, false, isOrigDelegate, out del);
             }
 
             return new GenerateDelegateForResult {
@@ -448,7 +494,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
         }
 
         // Returns true if this method should be called again for NoVisibleBackCompat purposes.
-        private bool GenerateDelegateFor2(MethodDefinition method, bool allowPrivateTypes, out TypeDefinition del) {
+        private bool GenerateDelegateFor2(MethodDefinition method, bool allowPrivateTypes, bool isOrigDelegate, out TypeDefinition del) {
             del = new TypeDefinition(
                 null, null,
                 TypeAttributes.NestedPublic | TypeAttributes.Sealed | TypeAttributes.Class,
@@ -529,24 +575,25 @@ namespace MonoMod.RuntimeDetour.HookGen {
             del.Methods.Add(invokeEnd);
 
             // Backcompat experiment.
-            if (needVisibilityBackCompat) {
+            if (needVisibilityBackCompat && isOrigDelegate) {
                 del.Attributes &= ~TypeAttributes.NestedPublic;
                 del.Attributes |= TypeAttributes.NestedPrivate;
 
-                ctor.Attributes &= ~MethodAttributes.Public;
-                ctor.Attributes |= MethodAttributes.Private;
+                //ctor.Attributes &= ~MethodAttributes.Public;
+                //ctor.Attributes |= MethodAttributes.Private;
 
-                invoke.Attributes &= ~MethodAttributes.Public;
-                invoke.Attributes |= MethodAttributes.Private;
+                //invoke.Attributes &= ~MethodAttributes.Public;
+                //invoke.Attributes |= MethodAttributes.Private;
 
-                invokeBegin.Attributes &= ~MethodAttributes.Public;
-                invokeBegin.Attributes |= MethodAttributes.Private;
+                //invokeBegin.Attributes &= ~MethodAttributes.Public;
+                //invokeBegin.Attributes |= MethodAttributes.Private;
 
-                invokeEnd.Attributes &= ~MethodAttributes.Public;
-                invokeEnd.Attributes |= MethodAttributes.Private;
+                //invokeEnd.Attributes &= ~MethodAttributes.Public;
+                //invokeEnd.Attributes |= MethodAttributes.Private;
 
                 // Block needed so that mono is happy and correctly find the Invoke methods
                 {
+                    bool unused = false;
                     TypeReference invokeReturnType2 = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.ReturnType,
     true, ref needVisibilityBackCompat);
                     MethodDefinition invoke2 = new MethodDefinition(
@@ -559,14 +606,14 @@ namespace MonoMod.RuntimeDetour.HookGen {
                     };
                     if (!method.IsStatic) {
                         TypeReference selfType2 = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(method.DeclaringType,
-                            true, ref needVisibilityBackCompat);
+                            true, ref unused);
                         if (method.DeclaringType.IsValueType)
                             selfType2 = new ByReferenceType(selfType2);
                         invoke2.Parameters.Add(new ParameterDefinition("self", ParameterAttributes.None, selfType2));
                     }
                     foreach (ParameterDefinition param in method.Parameters) {
                         TypeReference paramType = GetImportedTypeAndCheckIfNoVisibleBackCompatSuffixNeeded(param.ParameterType,
-                            true, ref needVisibilityBackCompat);
+                            true, ref unused);
                         invoke2.Parameters.Add(new ParameterDefinition(
                             param.Name,
                             param.Attributes & ~ParameterAttributes.Optional & ~ParameterAttributes.HasDefault,
@@ -584,7 +631,7 @@ namespace MonoMod.RuntimeDetour.HookGen {
                         ImplAttributes = MethodImplAttributes.Runtime | MethodImplAttributes.Managed,
                         HasThis = true
                     };
-                    foreach (ParameterDefinition param in invoke.Parameters)
+                    foreach (ParameterDefinition param in invoke2.Parameters)
                         invokeBegin2.Parameters.Add(new ParameterDefinition(param.Name, param.Attributes, param.ParameterType));
                     invokeBegin2.Parameters.Add(new ParameterDefinition("callback", ParameterAttributes.None, t_AsyncCallback));
                     invokeBegin2.Parameters.Add(new ParameterDefinition(null, ParameterAttributes.None, OutputModule.TypeSystem.Object));
