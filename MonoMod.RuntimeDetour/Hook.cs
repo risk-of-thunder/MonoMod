@@ -100,7 +100,8 @@ namespace MonoMod.RuntimeDetour {
                     for (int i = 0; i < argTypes.Length; i++) {
                         Type argMethod = argTypes[i];
                         Type argOrigInvoke = origInvokeArgTypes[i];
-                        if (!argMethod.IsCompatible(argOrigInvoke)) {
+                        if (!argMethod.IsCompatible(argOrigInvoke) ||
+                            (argMethod.IsValueType && argMethod != typeof(ValueType) && argOrigInvoke == typeof(ValueType))) {
                             // Doesn't match, try to get the correct OrigDelegateInvoke from the sibling orig_ delegate type.
                             var bindingFlags = (BindingFlags) (-1);
                             Type sibling = origType.DeclaringType
