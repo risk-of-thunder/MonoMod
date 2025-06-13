@@ -56,7 +56,7 @@
   <!-- Metadata -->
   <PropertyGroup>
     <Authors>0x0ade</Authors> <!-- Note: With dotnet pack, <Authors> is also the list of owners. -->
-    <Version>$([System.DateTime]::Now.ToString(yy.MM.dd)).00</Version> <!-- Devbuild -->
+    <Version>22.01.29.02</Version> <!-- Hardcoded for risk-of-thunder RoR2 fork -->
     <Version Condition="'$(BUILD_BUILDNUMBER)' != ''">$(BUILD_BUILDNUMBER)</Version> <!-- Azure Pipelines -->
     <Copyright>Copyright $([System.DateTime]::Now.ToString(yyyy)) 0x0ade</Copyright>
     <PackageTags>MonoMod;assembly;assemblies;module;modules;il;cil;msil;bytecode;reflection;injection;cecil;mono;$(PackageTags)</PackageTags>
